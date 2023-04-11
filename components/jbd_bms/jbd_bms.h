@@ -12,6 +12,9 @@ namespace jbd_bms {
 
 class JbdBms : public uart::UARTDevice, public PollingComponent {
  public:
+  bool must_send_charge_mos_state = false;
+  bool must_send_discharge_mos_state = false;
+
   void loop() override;
   void dump_config() override;
   void update() override;
@@ -107,7 +110,6 @@ class JbdBms : public uart::UARTDevice, public PollingComponent {
   }
   void set_enable_fake_traffic(bool enable_fake_traffic) { enable_fake_traffic_ = enable_fake_traffic; }
   void set_rx_timeout(uint16_t rx_timeout) { rx_timeout_ = rx_timeout; }
-  void write_register(uint8_t address, uint16_t value);
 
  protected:
   binary_sensor::BinarySensor *balancing_binary_sensor_;
@@ -179,8 +181,9 @@ class JbdBms : public uart::UARTDevice, public PollingComponent {
   void publish_device_unavailable_();
   void reset_online_status_tracker_();
   void track_online_status_();
-  void send_command_(uint8_t action, uint8_t function);
+  void send_command_(uint8_t action, uint8_t function, uint8_t len = 0, uint8_t data[] = nullptr);
   std::string error_bits_to_string_(uint16_t bitmask);
+  void write_mos_state_(bool mos_charge_enabled, bool mos_discharge_enabled);
 
   uint16_t chksum_(const uint8_t data[], const uint16_t len) {
     uint16_t checksum = 0x00;

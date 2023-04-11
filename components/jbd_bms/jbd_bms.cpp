@@ -62,12 +62,22 @@ void JbdBms::loop() {
       this->last_byte_ = now;
     } else {
       this->rx_buffer_.clear();
+      must_send_charge_mos_state = false;
+      must_send_discharge_mos_state = false;
     }
   }
 }
 
 void JbdBms::update() {
   this->track_online_status_();
+
+  if (must_send_charge_mos_state || must_send_discharge_mos_state) {
+    this->write_mos_state_(this->charging_switch_->state, this->discharging_switch_->state);
+    ESP_LOGD(TAG, "Sending MOS state before update: chg %d dis %d", this->charging_switch_->state,
+             this->discharging_switch_->state);
+    return;
+  }
+
   this->send_command_(JBD_CMD_READ, JBD_CMD_HWINFO);
 
   if (this->enable_fake_traffic_) {
@@ -173,6 +183,14 @@ void JbdBms::on_jbd_bms_data_(const uint8_t &function, const std::vector<uint8_t
       break;
     case JBD_CMD_HWVER:
       this->on_hardware_version_data_(data);
+      break;
+    case JBD_CMD_MOS:
+      if (must_send_charge_mos_state || must_send_discharge_mos_state) {
+        // start regular poll after the MOS command has finished
+        this->send_command_(JBD_CMD_READ, JBD_CMD_HWINFO);
+      }
+      must_send_charge_mos_state = false;
+      must_send_discharge_mos_state = false;
       break;
     default:
       ESP_LOGW(TAG, "Unhandled response received: %s", format_hex_pretty(&data.front(), data.size()).c_str());
@@ -287,7 +305,9 @@ void JbdBms::on_hardware_info_data_(const std::vector<uint8_t> &data) {
   uint8_t operation_status = data[20];
   this->publish_state_(this->operation_status_bitmask_sensor_, operation_status);
   this->publish_state_(this->charging_binary_sensor_, operation_status & JBD_MOS_CHARGE);
+  this->charging_switch_->publish_state((operation_status & JBD_MOS_CHARGE) == JBD_MOS_CHARGE);
   this->publish_state_(this->discharging_binary_sensor_, operation_status & JBD_MOS_DISCHARGE);
+  this->discharging_switch_->publish_state((operation_status & JBD_MOS_DISCHARGE) == JBD_MOS_DISCHARGE);
 
   // 21    2   0x04                   Cell count
   this->publish_state_(this->battery_strings_sensor_, data[21]);
@@ -472,25 +492,52 @@ void JbdBms::publish_state_(text_sensor::TextSensor *text_sensor, const std::str
   text_sensor->publish_state(state);
 }
 
-void JbdBms::write_register(uint8_t address, uint16_t value) {
-  this->send_command_(JBD_CMD_WRITE, JBD_CMD_MOS);  // @TODO: Pass value
+void JbdBms::write_mos_state_(bool mos_charge_enabled, bool mos_discharge_enabled) {
+  uint8_t data[2] = {};
+
+  data[1] = (!this->discharging_switch_->state << 1) | !this->charging_switch_->state;
+
+  ESP_LOGD(TAG, "dis %d chg %d, val %d", this->discharging_switch_->state, this->charging_switch_->state, data[1]);
+
+  // note: the MOS flags are inverted. setting the flags to 1 will
+  // turn the fet off, 0 is on.
+
+  if (mos_charge_enabled) {
+    data[1] &= (~(1 << 0));
+  } else {
+    data[1] |= (1 << 0);
+  }
+
+  if (mos_discharge_enabled) {
+    data[1] &= (~(1 << 1));
+  } else {
+    data[1] |= (1 << 1);
+  }
+
+  this->send_command_(JBD_CMD_WRITE, JBD_CMD_MOS, 2, data);
 }
 
-void JbdBms::send_command_(uint8_t action, uint8_t function) {
-  uint8_t frame[7];
-  uint8_t data_len = 0;
+void JbdBms::send_command_(uint8_t action, uint8_t function, uint8_t len, uint8_t data[]) {
+  uint8_t frame[256];
+  uint8_t data_len = len;
+  uint8_t pos = 0;
 
-  frame[0] = JBD_PKT_START;
-  frame[1] = action;
-  frame[2] = function;
-  frame[3] = data_len;
+  frame[pos++] = JBD_PKT_START;
+  frame[pos++] = action;
+  frame[pos++] = function;
+  frame[pos++] = data_len;
+  if (len > 0 && data) {
+    memcpy(frame + pos, data, len);
+    pos += len;
+  }
   auto crc = chksum_(frame + 2, data_len + 2);
-  frame[4] = crc >> 8;
-  frame[5] = crc >> 0;
-  frame[6] = JBD_PKT_END;
+  frame[pos++] = crc >> 8;
+  frame[pos++] = crc >> 0;
+  frame[pos++] = JBD_PKT_END;
 
-  this->write_array(frame, 7);
+  this->write_array(frame, pos);
   this->flush();
+  // delete[] frame;
 }
 
 std::string JbdBms::error_bits_to_string_(const uint16_t mask) {
