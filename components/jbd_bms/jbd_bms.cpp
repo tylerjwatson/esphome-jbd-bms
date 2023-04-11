@@ -495,24 +495,9 @@ void JbdBms::publish_state_(text_sensor::TextSensor *text_sensor, const std::str
 void JbdBms::write_mos_state_(bool mos_charge_enabled, bool mos_discharge_enabled) {
   uint8_t data[2] = {};
 
-  data[1] = (!this->discharging_switch_->state << 1) | !this->charging_switch_->state;
+  data[1] = ~((mos_discharge_enabled << 1) | mos_charge_enabled) & 0x03;
 
-  ESP_LOGD(TAG, "dis %d chg %d, val %d", this->discharging_switch_->state, this->charging_switch_->state, data[1]);
-
-  // note: the MOS flags are inverted. setting the flags to 1 will
-  // turn the fet off, 0 is on.
-
-  if (mos_charge_enabled) {
-    data[1] &= (~(1 << 0));
-  } else {
-    data[1] |= (1 << 0);
-  }
-
-  if (mos_discharge_enabled) {
-    data[1] &= (~(1 << 1));
-  } else {
-    data[1] |= (1 << 1);
-  }
+  ESP_LOGD(TAG, "dis %d chg %d, val 0x%02x", mos_discharge_enabled, mos_charge_enabled, data[1]);
 
   this->send_command_(JBD_CMD_WRITE, JBD_CMD_MOS, 2, data);
 }
